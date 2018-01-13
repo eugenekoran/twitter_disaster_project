@@ -1,7 +1,12 @@
+# encoding: utf-8
+
 from __future__ import division, print_function
+
+
 import pandas as pd
 import pandas as pd
 import numpy as np
+from collections import defaultdict
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -44,8 +49,11 @@ class MyTokenizer(BaseEstimator, TransformerMixin):
     '''
     Class for standard scaling of continuous features of pandas.DataFrame
     '''
-    def __init__(self, vocab_size=5000, seq_len=33):
-        self.tokenizer = Tokenizer(num_words=None)
+    def __init__(self, vocab_size=5000, seq_len=33, filters=None):
+        if filters is None:
+            self.tokenizer = Tokenizer(num_words=None)
+        else:
+            self.tokenizer = Tokenizer(num_words=None, filters=filters)
         self.vocab_size = vocab_size
         self.seq_len = seq_len
         self.word2idx = None
@@ -58,7 +66,6 @@ class MyTokenizer(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-
         X = self.tokenizer.texts_to_sequences(X)
         X = np.array([
             [self.vocab_size - 1 if i >= self.vocab_size else i for i in line]
@@ -85,11 +92,11 @@ class KerasPipeline(object):
         self.class_names = class_names
         self.for_explanation = None
 
-    def fit(self, X_train, y_train, X_val, y_val):
+    def fit(self, X_train, y_train, X_val, y_val, epochs=2):
         self.for_explanation = X_val
         X_train = self.tokenizer.fit_transform(X_train, y_train)
         X_val = self.tokenizer.transform(X_val)
-        model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=2,
+        model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs,
         batch_size=32)
         return model
 
@@ -99,22 +106,38 @@ class KerasPipeline(object):
         prob_0 = 1 - prob_1
         return np.concatenate((prob_0, prob_1), axis=1)
 
-    def explain_one_example(self, idx=None, num_features=5):
+    def explain_one_example(self, idx=None, num_features=5, print_out=True):
         if idx is None:
             idx = np.random.choice(self.for_explanation.index)
 
         explainer = LimeTextExplainer(class_names=self.class_names)
-
-        print ('Tweet {}: {}'.format(idx, self.for_explanation[idx]))
-        print (self.predict_proba([self.for_explanation[idx]]))
-
         exp = explainer.explain_instance(self.for_explanation[idx],
                                          self.predict_proba,
                                          num_features=num_features)
 
-        print (exp.as_pyplot_figure())
-        plt.show()
+        if print_out:
+            print ('Tweet {}: {}'.format(idx, self.for_explanation[idx]))
+            print (self.predict_proba([self.for_explanation[idx]]))
+            print (exp.as_pyplot_figure())
+            plt.show()
         return exp
+
+    def explain_model(self, num_examples=10, **kwargs):
+        idxs = np.random.choice(self.for_explanation.index, size=num_examples, replace=False)
+        contributors = defaultdict(list)
+        for i in idxs:
+           exp = self.explain_one_example(idx=i, print_out=False, **kwargs)
+           for word, weight in exp.as_list():
+               contributors[word.lower()].append(weight)
+        mean_contrib = []
+        for key in contributors:
+            mean_contrib.append((key, np.mean(contributors[key])))
+        mean_contrib.sort(key=lambda x: np.abs(x[1]), reverse=True)
+        return mean_contrib
+
+
+
+
 
 
 def baseline(X, y, max_features=5000, f=CountVectorizer):
@@ -199,6 +222,7 @@ def explain_one_example(tokenizer, model, X_test, idx):
 
     print (exp.as_list())
 
+
 def train_1_layer_nn():
     pass
     #TODO: function for one layer nn
@@ -210,10 +234,11 @@ def my_pipe_pedict_proba(X, tokenizer, model):
     return np.array([[prob_0, prob_1]])
 
 if __name__ == "__main__":
-    df = pd.read_csv('socialmedia-disaster-tweets-DFE.csv')
+    df = pd.read_csv("socialmedia-disaster-tweets_clean.csv")
     df = df[df.choose_one != "Can't Decide"]
 
     X = df.text
+    X = X.str.replace(r"http\S+", '##')
     y = pd.get_dummies(df.choose_one, drop_first=True)
     y = y.values
 
@@ -221,7 +246,7 @@ if __name__ == "__main__":
 
     vocab_size=5000; seq_len=33
 
-    tokenizer = MyTokenizer(vocab_size, seq_len)
+    tokenizer = MyTokenizer(vocab_size, seq_len, filters='!"$%&()*+,-./:;<=>?[\\]^_`{|}~\t\n')
 
     model = Sequential([
         Embedding(vocab_size, 25, input_length=seq_len),
@@ -230,10 +255,12 @@ if __name__ == "__main__":
         Dropout(0.7),
         Dense(1, activation='sigmoid')])
 
+
+
     conv1 = Sequential([
         Embedding(vocab_size, 25, input_length=seq_len),
         SpatialDropout1D(0.2),
-        Conv1D(8, 5, padding='same', activation='relu'),
+        Conv1D(64, 5, padding='same', activation='relu'),
         Dropout(0.3),
         MaxPooling1D(),
         Flatten(),
@@ -241,9 +268,11 @@ if __name__ == "__main__":
         Dropout(0.7),
         Dense(1, activation='sigmoid')])
 
+    #Best conv1 val accuracy: 0.8132
+
     model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
 
-    pipe = KerasPipeline(tokenizer, conv1)
+    pipe = KerasPipeline(tokenizer, model)
     pipe.fit(X_train, y_train, X_test, y_test)
 
     #pipe.explain_one_example()
