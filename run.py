@@ -2,7 +2,7 @@
 
 from __future__ import division, print_function
 
-
+import re
 import pandas as pd
 import pandas as pd
 import numpy as np
@@ -17,6 +17,7 @@ from sklearn.pipeline import make_pipeline
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
 
 import keras
 from keras import backend as K
@@ -145,11 +146,25 @@ def baseline(X, y, max_features=5000, f=CountVectorizer):
     vectorizer = f(stop_words='english', decode_error='ignore', max_features=max_features)
     X_train = vectorizer.fit_transform(X_train)
 
-    nb = MultinomialNB()
+    nb = RandomForestClassifier(n_estimators=500)
     nb.fit(X_train, y_train)
 
     X_test = vectorizer.transform(X_test)
     print ('Naive Bayes model accuracy: {}'.format(nb.score(X_test, y_test)))
+    return vectorizer, nb
+
+def random_f(X, y, max_features=5000, f=CountVectorizer):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
+    vectorizer = f(stop_words='english', decode_error='ignore', max_features=max_features)
+    X_train = vectorizer.fit_transform(X_train)
+
+    rf = RandomForestClassifier()
+    rf.fit(X_train, y_train)
+
+    X_test = vectorizer.transform(X_test)
+    print ('Naive Bayes model accuracy: {}'.format(rf.score(X_test, y_test)))
+    return vectorizer, rf
+
 
 def baseline_grid_search(X,y):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
@@ -227,6 +242,16 @@ def train_1_layer_nn():
     pass
     #TODO: function for one layer nn
 
+def create_emb(w2v, tokenizer, vocab_size):
+    n_fact = w2v.vector_size
+    emb = np.zeros((vocab_size, n_fact))
+
+    for i in range(1,len(emb)):
+        word = tokenizer.idx2word[i]
+        if word in w2v.vocab:
+            emb[i] = w2v[word]
+    return emb
+
 def my_pipe_pedict_proba(X, tokenizer, model):
     X = tokenizer.transform(X)
     prob_1 = model.predict_proba(X)[0][0]
@@ -238,43 +263,97 @@ if __name__ == "__main__":
     df = df[df.choose_one != "Can't Decide"]
 
     X = df.text
-    X = X.str.replace(r"http\S+", '##')
+    X = X.str.replace('#', '# ')
+    X = X.str.replace('@', '@ ')
+    X = X.str.replace(r"http\S+", 'http')
     y = pd.get_dummies(df.choose_one, drop_first=True)
     y = y.values
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
 
-    vocab_size=5000; seq_len=33
+    vocab_size=5000; seq_len=15
 
     tokenizer = MyTokenizer(vocab_size, seq_len, filters='!"$%&()*+,-./:;<=>?[\\]^_`{|}~\t\n')
 
+    emb = np.loadtxt('emb.txt')
+
     model = Sequential([
-        Embedding(vocab_size, 25, input_length=seq_len),
-        Flatten(),
-        Dense(100, activation='relu'),
-        Dropout(0.7),
-        Dense(1, activation='sigmoid')])
-
-
-
-    conv1 = Sequential([
-        Embedding(vocab_size, 25, input_length=seq_len),
+        Embedding(vocab_size, 50, input_length=seq_len),
         SpatialDropout1D(0.2),
-        Conv1D(64, 5, padding='same', activation='relu'),
-        Dropout(0.3),
-        MaxPooling1D(),
         Flatten(),
         Dense(100, activation='relu'),
         Dropout(0.7),
         Dense(1, activation='sigmoid')])
-
-    #Best conv1 val accuracy: 0.8132
 
     model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
 
-    pipe = KerasPipeline(tokenizer, model)
-    pipe.fit(X_train, y_train, X_test, y_test)
+    # model_embed = Sequential([
+    #     Embedding(vocab_size, 50, weights=[emb], input_length=seq_len, trainable=False),
+    #     Flatten(),
+    #     Dense(100, activation='relu'),
+    #     Dropout(0.7),
+    #     Dense(1, activation='sigmoid')])
+    #
+    # model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+    #
+    #
+    # conv1 = Sequential([
+    #     Embedding(vocab_size, 25, input_length=seq_len),
+    #     SpatialDropout1D(0.2),
+    #     Conv1D(64, 5, padding='same', activation='relu'),
+    #     Dropout(0.3),
+    #     MaxPooling1D(),
+    #     Flatten(),
+    #     Dense(100, activation='relu'),
+    #     Dropout(0.7),
+    #     Dense(1, activation='sigmoid')])
+    #
+    # conv1.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+    #
+    # #Best conv1 val accuracy: 0.8132
+    #
+    #
+    # conv1emb = Sequential([
+    #     Embedding(vocab_size, 50, input_length=seq_len, weights=[emb], trainable=False),
+    #     SpatialDropout1D(0.2),
+    #     Conv1D(128, 5, padding='same', activation='relu'),
+    #     Dropout(0.5),
+    #     MaxPooling1D(),
+    #     Flatten(),
+    #     Dense(100, activation='relu'),
+    #     Dropout(0.7),
+    #     Dense(1, activation='sigmoid')])
+    #
+    # conv1emb.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+    #
+    # #Best conv1emb val accuracy: 0.8020
+    #
+    # conv1emb0_1 = Sequential([
+    #     Embedding(vocab_size, 50, input_length=seq_len, weights=[emb], trainable=False),
+    #     Conv1D(128, 5, padding='same', activation='relu'),
+    #     MaxPooling1D(5),
+    #     Conv1D(128, 5, padding='same', activation='relu'),
+    #     MaxPooling1D(),
+    #     Conv1D(128, 5, padding='same', activation='relu'),
+    #     MaxPooling1D(),
+    #     Flatten(),
+    #     Dense(100, activation='relu'),
+    #     Dropout(0.7),
+    #     Dense(1, activation='sigmoid')])
 
-    #pipe.explain_one_example()
+    # conv1emb.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+
+    # rnn = Sequential([
+    # (Embedding(vocab_size, 50, weights=[emb], input_length=seq_len, trainable=False)),
+    # (LSTM(100, go_backwards=True)),
+    # (Dense(1, activation='sigmoid'))])
+    #
+    # rnn.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+
+
+    pipe = KerasPipeline(tokenizer, model)
+    pipe.fit(X_train, y_train, X_test, y_test, epochs=2)
+
+    pipe.explain_one_example(9578)
 
     filename='/Users/yauhenikoran/Glove/glove.twitter.27B.50d.w2v.txt'
