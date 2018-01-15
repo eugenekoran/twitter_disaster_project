@@ -87,18 +87,99 @@ class MyPipe(object):
         return np.concatenate((prob_0, prob_1), axis=1)
 
 class KerasPipeline(object):
-    def __init__(self, tokenizer, model, class_names=['Not relevant', 'Relevant']):
-        self.tokenizer = tokenizer
-        self.model = model
+    def __init__(self, model, class_names=['Not relevant', 'Relevant'],
+                    vocab_size=5000, embed_size=32, seq_len=33, emb_path=None):
+
+        assert model in ['nn', 'cnn1d', 'cnn1d_emb', 'lstm'], \
+            "Invalid model: '{}'. Available models to train: ['nn', 'cnn1d', 'cnn1d_emb', 'lstm']".format(model)
+
+        self.vocab_size = vocab_size
+        self.embed_size = embed_size
+        self.seq_len = seq_len
         self.class_names = class_names
         self.for_explanation = None
+        self.emb_path = emb_path #path to embeddings file
+        self.emb = None
 
-    def fit(self, X_train, y_train, X_val, y_val, epochs=2):
+        if model in ['cnn1d_emb', 'lstm']:
+            assert self.emb_path is not None, 'No path to embeddings file'
+            self.emb = np.loadtxt(self.emb_path)
+            self.vocab_size, self.embed_size = self.emb.shape
+
+        self.tokenizer = MyTokenizer(self.vocab_size,
+                                     self.seq_len,
+                                     filters='!"$%&()*+,-./:;<=>?[\\]^_`{|}~\t\n')
+
+        self.model = self.load_model(model)
+
+    def load_model(self, model):
+        #pdb.set_trace()
+        if model == 'nn':
+
+            model = Sequential([
+            Embedding(self.vocab_size, self.embed_size,
+                                                    input_length=self.seq_len),
+            SpatialDropout1D(0.2),
+            Flatten(),
+            Dense(100, activation='relu'),
+            Dropout(0.7),
+            Dense(1, activation='sigmoid')])
+
+            model.compile(loss='binary_crossentropy',
+                          optimizer='adam',
+                          metrics=['accuracy'])
+
+        elif model == 'cnn1d':
+
+            model = Sequential([
+                Embedding(self.vocab_size, self.embed_size,
+                                                    input_length=self.seq_len),
+                SpatialDropout1D(0.2),
+                Conv1D(64, 5, padding='same', activation='relu'),
+                Dropout(0.3),
+                MaxPooling1D(),
+                Flatten(),
+                Dense(100, activation='relu'),
+                Dropout(0.7),
+                Dense(1, activation='sigmoid')])
+
+            model.compile(loss='binary_crossentropy',
+                          optimizer=Adam(),
+                          metrics=['accuracy'])
+
+        elif model == 'cnn1d_emb':
+
+            model = Sequential([
+                Embedding(self.vocab_size, self.embed_size, input_length=self.seq_len , weights=[self.emb], trainable=False),
+                SpatialDropout1D(0.2),
+                Conv1D(128, 5, padding='same', activation='relu'),
+                Dropout(0.5),
+                MaxPooling1D(),
+                Flatten(),
+                Dense(100, activation='relu'),
+                Dropout(0.7),
+                Dense(1, activation='sigmoid')])
+
+            model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+
+        elif model == 'lstm':
+
+            model = Sequential([
+            (Embedding(self.vocab_size, self.embed_size, weights=[self.emb], input_length=self.seq_len, trainable=False)),
+            (LSTM(100, go_backwards=True)),
+            (Dense(1, activation='sigmoid'))])
+
+            model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+
+        print (model.summary())
+        return model
+
+
+    def fit(self, X_train, y_train, X_val, y_val, **kwargs):
         self.for_explanation = X_val
         X_train = self.tokenizer.fit_transform(X_train, y_train)
         X_val = self.tokenizer.transform(X_val)
-        self.model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs,
-        batch_size=32)
+        self.model.fit(X_train, y_train, validation_data=(X_val, y_val), **kwargs)
         return self.model
 
     def predict_proba(self, X):
@@ -108,13 +189,14 @@ class KerasPipeline(object):
         return np.concatenate((prob_0, prob_1), axis=1)
 
     def explain_one_example(self, idx=None, num_features=5, print_out=True):
+
         if idx is None:
             idx = np.random.choice(self.for_explanation.index)
 
         explainer = LimeTextExplainer(class_names=self.class_names)
         exp = explainer.explain_instance(self.for_explanation[idx],
                                          self.predict_proba,
-                                         num_features=num_features)
+                                 num_features=num_features)
 
         if print_out:
             print ('Tweet {}: {}'.format(idx, self.for_explanation[idx]))
@@ -127,9 +209,16 @@ class KerasPipeline(object):
         idxs = np.random.choice(self.for_explanation.index, size=num_examples, replace=False)
         contributors = defaultdict(list)
         for i in idxs:
-           exp = self.explain_one_example(idx=i, print_out=False, **kwargs)
-           for word, weight in exp.as_list():
-               contributors[word.lower()].append(weight)
+            #Temporary fix to make explanations. #TODO Fix it
+            while True:
+                try:
+                    exp = self.explain_one_example(idx=i, print_out=False, **kwargs)
+                    break
+                except UnicodeDecodeError:
+                    i = np.random.choice(self.for_explanation.index)
+
+            for word, weight in exp.as_list():
+                contributors[word.lower()].append(weight)
         mean_contrib = []
         for key in contributors:
             mean_contrib.append((key, np.mean(contributors[key])))
@@ -206,26 +295,6 @@ def  preprocess(X,y):
     X_test = sequence.pad_sequences(X_test, maxlen=seq_len)
     return tokenizer, X_train, X_test
 
-def cnn(X_train, y_train, X_val, y_val, vocab_size=5000, seq_len=33):
-    tokenizer = MyTokenizer()
-    X_train = tokenizer.fit_transform(X_train, y_train)
-    X_val = tokenizer.transform(X_val)
-
-    model = Sequential([
-        Embedding(vocab_size, 32, input_length=seq_len),
-        Flatten(),
-        Dense(100, activation='relu'),
-        Dropout(0.7),
-        Dense(1, activation='sigmoid')])
-
-    model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
-
-    model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=4,
-    batch_size=32)
-
-    return tokenizer, model
-
-
 
 def explain_one_example(tokenizer, model, X_test, idx):
     my_pipe = MyPipe(tokenizer, model)
@@ -239,10 +308,6 @@ def explain_one_example(tokenizer, model, X_test, idx):
 
     print (exp.as_list())
 
-
-def train_1_layer_nn():
-    pass
-    #TODO: function for one layer nn
 
 def create_emb(w2v, tokenizer, vocab_size):
     n_fact = w2v.vector_size
@@ -275,7 +340,7 @@ if __name__ == "__main__":
 
     vocab_size=5000; seq_len=33
 
-    tokenizer = MyTokenizer(vocab_size, seq_len, filters='!"$%&()*+,-./:;<=>?[\\]^_`{|}~\t\n')
+    #tokenizer = MyTokenizer(vocab_size, seq_len, filters='!"$%&()*+,-./:;<=>?[\\]^_`{|}~\t\n')
 
     #emb = np.loadtxt('emb.txt')
 
@@ -353,11 +418,18 @@ if __name__ == "__main__":
     # rnn.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
 
 
-    pipe = KerasPipeline(tokenizer, model)
+    pipe = KerasPipeline('cnn1d_emb', emb_path='full_emb.txt')
+    pipe.fit(X_train, y_train, X_test, y_test, epochs=2, batch_size=64)
 
-    pipe.fit(X_train, y_train, X_test, y_test, epochs=2)
+    # for model in ['nn', 'cnn1d', 'cnn1d_emb', 'lstm']:
+    #     pipe = KerasPipeline(model, emb_path='full_emb.txt')
+    #     pipe.fit(X_train, y_train, X_test, y_test, epochs=1, batch_size=64)
 
 
-    pipe.explain_one_example(9578)
+    #pipe.explain_one_example(9578)
+
+    #lstm 0.8112
+    #cnn1d_emb 0.8076
+    #nn 0.8085
 
     filename='/Users/yauhenikoran/Glove/glove.twitter.27B.50d.w2v.txt'
