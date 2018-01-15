@@ -2,12 +2,12 @@
 
 from __future__ import division, print_function
 
+import cPickle as pickle
 import re
 import pandas as pd
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import NMF, PCA, TruncatedSVD
@@ -48,7 +48,7 @@ import ipdb as pdb
 
 class MyTokenizer(BaseEstimator, TransformerMixin):
     '''
-    Class for standard scaling of continuous features of pandas.DataFrame
+    Class for turning text data into sequence of indices
     '''
     def __init__(self, vocab_size=5000, seq_len=33, filters=None):
         if filters is None:
@@ -97,9 +97,9 @@ class KerasPipeline(object):
         self.for_explanation = X_val
         X_train = self.tokenizer.fit_transform(X_train, y_train)
         X_val = self.tokenizer.transform(X_val)
-        model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs,
+        self.model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs,
         batch_size=32)
-        return model
+        return self.model
 
     def predict_proba(self, X):
         X = self.tokenizer.transform(X)
@@ -204,7 +204,7 @@ def  preprocess(X,y):
     X_test = np.array([[vocab_size - 1 if i >= vocab_size else i for i in line] for line in X_test])
     X_train = sequence.pad_sequences(X_train, maxlen=seq_len)
     X_test = sequence.pad_sequences(X_test, maxlen=seq_len)
-    return X_train, X_test
+    return tokenizer, X_train, X_test
 
 def cnn(X_train, y_train, X_val, y_val, vocab_size=5000, seq_len=33):
     tokenizer = MyTokenizer()
@@ -224,6 +224,8 @@ def cnn(X_train, y_train, X_val, y_val, vocab_size=5000, seq_len=33):
     batch_size=32)
 
     return tokenizer, model
+
+
 
 def explain_one_example(tokenizer, model, X_test, idx):
     my_pipe = MyPipe(tokenizer, model)
@@ -271,21 +273,21 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
 
-    vocab_size=5000; seq_len=15
+    vocab_size=5000; seq_len=33
 
     tokenizer = MyTokenizer(vocab_size, seq_len, filters='!"$%&()*+,-./:;<=>?[\\]^_`{|}~\t\n')
 
-    emb = np.loadtxt('emb.txt')
+    #emb = np.loadtxt('emb.txt')
 
     model = Sequential([
-        Embedding(vocab_size, 50, input_length=seq_len),
+        Embedding(vocab_size, 32, input_length=seq_len),
         SpatialDropout1D(0.2),
         Flatten(),
         Dense(100, activation='relu'),
         Dropout(0.7),
         Dense(1, activation='sigmoid')])
 
-    model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
 
     # model_embed = Sequential([
     #     Embedding(vocab_size, 50, weights=[emb], input_length=seq_len, trainable=False),
@@ -352,7 +354,9 @@ if __name__ == "__main__":
 
 
     pipe = KerasPipeline(tokenizer, model)
+
     pipe.fit(X_train, y_train, X_test, y_test, epochs=2)
+
 
     pipe.explain_one_example(9578)
 
