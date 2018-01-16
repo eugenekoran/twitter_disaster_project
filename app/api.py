@@ -17,13 +17,13 @@ with open('tokenizer.pkl', 'r') as f:
 
 vocab_size, seq_len, model = load_production_model()
 
-model.load_weights('model_weigths.krs')
+model.load_weights('lstm_weights.krs')
 
-def predict(twit, treshold=0.5):
+def predict(tweet, treshold=0.5):
     '''
     Predict
     '''
-    x = tokenizer.texts_to_sequences([twit])
+    x = tokenizer.texts_to_sequences([tweet])
     x = [[vocab_size - 1 if i >= vocab_size else i for i in line] for line in x]
     x = sequence.pad_sequences(x, maxlen=seq_len)
     prob = model.predict_proba(x)[0][0]
@@ -32,15 +32,15 @@ def predict(twit, treshold=0.5):
 class Prediction(Resource):
     def get(self):
         parser = reqparse.RequestParser()
-        parser.add_argument('twit', help='slength cannot be converted')
+        parser.add_argument('tweet', help='slength cannot be converted')
         args = parser.parse_args()
 
-        prediction, prob = predict(args['twit'])
+        prediction, prob = predict(args['tweet'])
 
         print "PREDICTION: {} PROB_of_RELEVANT: {}".format(prediction, prob)
 
         return {
-                'twit': args['twit'],
+                'tweet': args['tweet'],
                 'prediction': prediction,
                 'prob_of_relevant': str(prob)
                }
