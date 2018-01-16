@@ -2,71 +2,74 @@
 
 from __future__ import division, print_function
 
-import cPickle as pickle
-import re
-import pandas as pd
+from collections import defaultdict
 import pandas as pd
 import numpy as np
-from collections import defaultdict
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.decomposition import NMF, PCA, TruncatedSVD
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.pipeline import Pipeline
-from sklearn.pipeline import make_pipeline
 import matplotlib.pyplot as plt
+
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import GridSearchCV
-from sklearn.ensemble import RandomForestClassifier
-
-import keras
-from keras import backend as K
-from keras.utils.data_utils import get_file
-from keras.utils import np_utils
-from keras.utils.np_utils import to_categorical
-from keras.models import Sequential, Model
-from keras.layers import Input, Embedding, Reshape, merge, LSTM, Bidirectional
-from keras.layers import TimeDistributed, Activation, SimpleRNN, GRU, SpatialDropout1D
-from keras.layers.core import Flatten, Dense, Dropout, Lambda
-from keras.regularizers import l2, l1
-from keras.layers.normalization import BatchNormalization
-from keras.optimizers import SGD, RMSprop, Adam
-from keras.layers import deserialize as layer_from_config
-from keras.metrics import categorical_crossentropy, categorical_accuracy
-from keras.layers.convolutional import *
-from keras.preprocessing import image, sequence
-from keras.preprocessing.text import Tokenizer
+from sklearn.pipeline import Pipeline
+from sklearn.pipeline import make_pipeline
 from sklearn.base import BaseEstimator, TransformerMixin
 
-from gensim.scripts.glove2word2vec import glove2word2vec
-from gensim.models import KeyedVectors
+from keras.preprocessing import sequence
+from keras.preprocessing.text import Tokenizer
+from keras.models import Sequential
+from keras.layers import Embedding, LSTM, SpatialDropout1D
+from keras.layers.core import Flatten, Dense, Dropout
+from keras.layers.convolutional import Conv1D, MaxPooling1D
+from keras.optimizers import Adam
 
-import lime
 from lime.lime_text import LimeTextExplainer
 
-import ipdb as pdb
 
 class MyTokenizer(BaseEstimator, TransformerMixin):
     '''
-    Class for turning text data into sequence of indices
+    Class for turning text data into sequence of indices.
+
+    Wrapper of keras.preprocessing.text.Tokenizer. Additionally limits vocabulary
+    and pre-pads sequences with zeros to the unified length.
+
+    # Arguments:
+        vocab_size: int, size of the vocabulary (default: 5000).
+        seq_len: int, unifies length (default: 33).
+        kwargs: arguments to keras.preprocessing.text.Tokenizer.
     '''
-    def __init__(self, vocab_size=5000, seq_len=33, filters=None):
-        if filters is None:
-            self.tokenizer = Tokenizer(num_words=None)
-        else:
-            self.tokenizer = Tokenizer(num_words=None, filters=filters)
+    def __init__(self, vocab_size=5000, seq_len=33, **kwargs):
+        self.tokenizer = Tokenizer(**kwargs)
         self.vocab_size = vocab_size
         self.seq_len = seq_len
         self.word2idx = None
         self.idx2word = None
 
     def fit(self, X, y):
+        '''Updates internal vocabulary based on a list of texts.
+
+        # Arguments:
+            X: sequence of strings.
+            y: sequnce of ints or booleans.
+
+        # Returns:
+            self
+        '''
         self.tokenizer.fit_on_texts(X)
         self.word2idx = self.tokenizer.word_index
         self.idx2word = {self.word2idx[key]:key for key in self.word2idx}
         return self
 
     def transform(self, X):
+        '''Converts sequence of strings to a Numpy ndarray.
+
+        #Arguments:
+            X: sequence of strings.
+
+        # Returns:
+            X: Numpy ndarray.
+        '''
         X = self.tokenizer.texts_to_sequences(X)
         X = np.array([
             [self.vocab_size - 1 if i >= self.vocab_size else i for i in line]
@@ -75,20 +78,28 @@ class MyTokenizer(BaseEstimator, TransformerMixin):
         return X
 
 
-class MyPipe(object):
-    def __init__(self, tokenizer, model):
-        self.tokenizer = tokenizer
-        self.model = model
-
-    def predict_proba(self, X):
-        X = self.tokenizer.transform(X)
-        prob_1 = self.model.predict_proba(X)
-        prob_0 = 1 - prob_1
-        return np.concatenate((prob_0, prob_1), axis=1)
-
 class KerasPipeline(object):
+    '''
+    This class allows to create, train and assess keras models. KerasPipeline
+    combines MyTokenizer and Keras models into a single class, making it easy to
+    experiment with model architectures.
+
+    User chooses parameters of embeddings and model type, internal model
+    parameters are fixed.
+
+    # Arguments:
+        model: string, model type (choice of: 'nn', 'cnn1d', 'cnn1d_emb','lstm').
+        class_names: list of strings, names of classes.
+        vocab_size: int, size of the vocabulary (default: 5000).
+        embed_size: int, size of the word embeddings (default: 32).
+        seq_len: int, unified length of data representation (default: 33).
+        emb_path: string, path to the pre-trained embeddings vectores. If
+            specified, rewrites vocab_size and embed_size to the parameters of
+            pre-trained vectors.
+
+    '''
     def __init__(self, model, class_names=['Not relevant', 'Relevant'],
-                    vocab_size=5000, embed_size=32, seq_len=33, emb_path=None):
+           vocab_size=5000, embed_size=32, seq_len=33, emb_path=None):
 
         assert model in ['nn', 'cnn1d', 'cnn1d_emb', 'lstm'], \
             "Invalid model: '{}'. Available models to train: ['nn', 'cnn1d', 'cnn1d_emb', 'lstm']".format(model)
@@ -97,10 +108,11 @@ class KerasPipeline(object):
         self.embed_size = embed_size
         self.seq_len = seq_len
         self.class_names = class_names
-        self.for_explanation = None
-        self.emb_path = emb_path #path to embeddings file
-        self.emb = None
+        self.for_explanation = None #Save validation data for explanations
+        self.emb_path = emb_path
+        self.emb = None #Embeddings matrix
 
+        #Load embeddings from file if model needs them
         if model in ['cnn1d_emb', 'lstm']:
             assert self.emb_path is not None, 'No path to embeddings file'
             self.emb = np.loadtxt(self.emb_path)
@@ -113,27 +125,31 @@ class KerasPipeline(object):
         self.model = self.load_model(model)
 
     def load_model(self, model):
-        #pdb.set_trace()
+        '''Loads Keras model and prints its summary.
+
+        # Arguments:
+            model: string, model type.
+        # Returns:
+            model: compiled Keras model
+        '''
+
+        #Raname variables for briefness
+        V, E, S = self.vocab_size, self.embed_size, self.seq_len
+
         if model == 'nn':
 
             model = Sequential([
-            Embedding(self.vocab_size, self.embed_size,
-                                                    input_length=self.seq_len),
-            SpatialDropout1D(0.2),
-            Flatten(),
-            Dense(100, activation='relu'),
-            Dropout(0.7),
-            Dense(1, activation='sigmoid')])
-
-            model.compile(loss='binary_crossentropy',
-                          optimizer='adam',
-                          metrics=['accuracy'])
+                Embedding(V, E, input_length=S),
+                SpatialDropout1D(0.2),
+                Flatten(),
+                Dense(100, activation='relu'),
+                Dropout(0.7),
+                Dense(1, activation='sigmoid')])
 
         elif model == 'cnn1d':
 
             model = Sequential([
-                Embedding(self.vocab_size, self.embed_size,
-                                                    input_length=self.seq_len),
+                Embedding(V, E, input_length=S),
                 SpatialDropout1D(0.2),
                 Conv1D(64, 5, padding='same', activation='relu'),
                 Dropout(0.3),
@@ -143,14 +159,10 @@ class KerasPipeline(object):
                 Dropout(0.7),
                 Dense(1, activation='sigmoid')])
 
-            model.compile(loss='binary_crossentropy',
-                          optimizer=Adam(),
-                          metrics=['accuracy'])
-
         elif model == 'cnn1d_emb':
 
             model = Sequential([
-                Embedding(self.vocab_size, self.embed_size, input_length=self.seq_len , weights=[self.emb], trainable=False),
+                Embedding(V, E, input_length=S , weights=[self.emb], trainable=False),
                 SpatialDropout1D(0.2),
                 Conv1D(128, 5, padding='same', activation='relu'),
                 Dropout(0.5),
@@ -160,22 +172,32 @@ class KerasPipeline(object):
                 Dropout(0.7),
                 Dense(1, activation='sigmoid')])
 
-            model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
-
         elif model == 'lstm':
 
             model = Sequential([
-            (Embedding(self.vocab_size, self.embed_size, weights=[self.emb], input_length=self.seq_len, trainable=False)),
+            (Embedding(V, E,  input_length=S, weights=[self.emb], trainable=False)),
             (LSTM(100, go_backwards=True)),
             (Dense(1, activation='sigmoid'))])
 
-            model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
+        model.compile(loss='binary_crossentropy',
+                      optimizer=Adam(),
+                      metrics=['accuracy'])
 
         print (model.summary())
         return model
 
 
     def fit(self, X_train, y_train, X_val, y_val, **kwargs):
+        '''Fits pipeline to training data.
+
+        # Arguments:
+            X_train, X_val: sequences of strings.
+            y_trin, y_val: equences of ints or booleans.
+            kwargs: optional arguments to keras.model.fit().
+
+        # Returns:
+            self.model: trained keras model.
+        '''
         self.for_explanation = X_val
         X_train = self.tokenizer.fit_transform(X_train, y_train)
         X_val = self.tokenizer.transform(X_val)
@@ -183,13 +205,34 @@ class KerasPipeline(object):
         return self.model
 
     def predict_proba(self, X):
+        '''Predict probabilities.
+
+        #Arguments:
+            X: sequences of strings
+
+        #Returns:
+            output: Numpy ndarray of shape (len(X), 2)
+        '''
         X = self.tokenizer.transform(X)
         prob_1 = self.model.predict_proba(X)
         prob_0 = 1 - prob_1
-        return np.concatenate((prob_0, prob_1), axis=1)
+        output = np.concatenate((prob_0, prob_1), axis=1)
+        return output
 
     def explain_one_example(self, idx=None, num_features=5, print_out=True):
+        '''Explaines predictions for a single datapoint with LIME.
 
+        If the index of the datapoint is not specified, explaines random point
+        from the validation data. Optionally prints out explanation.
+
+        # Arguments:
+            idx: int, index of a datapoint in the validation data (default=None)
+            num_features: int, number of explanatory features (default=5)
+            print_out: boolean (default=True)
+
+        # Returns:
+            exp: lime.explanation.Explanation object
+        '''
         if idx is None:
             idx = np.random.choice(self.for_explanation.index)
 
@@ -206,10 +249,23 @@ class KerasPipeline(object):
         return exp
 
     def explain_model(self, num_examples=10, **kwargs):
+        '''Explains model by applying LimeTextExplainer to a specified number of
+        validation datapoints and averaging up the contributions of the observed
+        words.
+
+        # Arguments:
+            num_examples: int, number of datapoints.
+            kwargs: optional arguments for self.explain_one_example().
+
+        # Returns:
+            mean_contrib: list of tuples (word, word`s contribution) ordered by
+                absolute value of mean contribution.
+        '''
         idxs = np.random.choice(self.for_explanation.index, size=num_examples, replace=False)
         contributors = defaultdict(list)
+
         for i in idxs:
-            #Temporary fix to make explanations. #TODO Fix it
+            #Fix unicode errors to make explanations.
             while True:
                 try:
                     exp = self.explain_one_example(idx=i, print_out=False, **kwargs)
@@ -219,45 +275,114 @@ class KerasPipeline(object):
 
             for word, weight in exp.as_list():
                 contributors[word.lower()].append(weight)
+
         mean_contrib = []
         for key in contributors:
             mean_contrib.append((key, np.mean(contributors[key])))
         mean_contrib.sort(key=lambda x: np.abs(x[1]), reverse=True)
+
         return mean_contrib
 
 
+def baseline(X_train, y_train, X_test, y_test, max_features=5000,
+             f=CountVectorizer):
+    '''Trains and evaluates Naive Bayes model on the bag of words text feature
+    representation.
 
+    # Arguments:
+        X_train, y_train, X_test, y_test: sequence of strings
+        y: sequence of ints or booleans
+        max_features: int, vocabulary size (default=5000)
+        f: sklearn vectorizer (default=CountVectorizer)
 
-
-
-def baseline(X, y, max_features=5000, f=CountVectorizer):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
-    vectorizer = f(stop_words='english', decode_error='ignore', max_features=max_features)
+    # Returns:
+        vectorizer: fitted sklearn vectorizer object
+        nb: fitted sklearn.naive_bayes.MultinomialNB object
+    '''
+    vectorizer = f(stop_words='english',
+                   decode_error='ignore',
+                   max_features=max_features)
     X_train = vectorizer.fit_transform(X_train)
 
-    nb = RandomForestClassifier(n_estimators=500)
-    nb.fit(X_train, y_train)
+    nb = MultinomialNB()
+    nb.fit(X_train, y_train.squeeze())
 
     X_test = vectorizer.transform(X_test)
-    print ('Naive Bayes model accuracy: {}'.format(nb.score(X_test, y_test)))
+    print ('Naive Bayes model accuracy: {}'.format(nb.score(X_test, y_test.squeeze())))
     return vectorizer, nb
 
-def random_f(X, y, max_features=5000, f=CountVectorizer):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
-    vectorizer = f(stop_words='english', decode_error='ignore', max_features=max_features)
+def random_forest(X_train, y_train, X_test, y_test, max_features=5000,
+                  f=TfidfVectorizer):
+    '''Trains and evaluates Random Forest model on the bag of words text feature
+    representation.
+
+    # Arguments:
+        X_train, y_train, X_test, y_test: sequence of strings
+        y: sequence of ints or booleans
+        max_features: int, vocabulary size (default=5000)
+        f: sklearn vectorizer (default=TfIdfVectorizer)
+
+    # Returns:
+        vectorizer: fitted sklearn vectorizer object
+        rf: fitted sklearn.naive_bayes.RandomForestClassifier object
+    '''
+    vectorizer = f(stop_words='english',
+                   decode_error='ignore',
+                   max_features=max_features)
     X_train = vectorizer.fit_transform(X_train)
 
-    rf = RandomForestClassifier()
-    rf.fit(X_train, y_train)
+    rf = RandomForestClassifier(n_estimators=500)
+    rf.fit(X_train, y_train.squeeze())
 
     X_test = vectorizer.transform(X_test)
-    print ('Naive Bayes model accuracy: {}'.format(rf.score(X_test, y_test)))
+    print ('Random Forest model accuracy: {}'.format(rf.score(X_test, y_test.squeeze())))
     return vectorizer, rf
 
+def explain_model(vectorizer, model, X_test, num_examples=10, num_features=5,
+                  class_names=['Not relevant', 'Relevant']):
+    '''Explains pipeline of sklearn vectorizer+model with LIME
 
-def baseline_grid_search(X,y):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
+    #Arguments:
+        vectorizer: fitted sklearn vectorizer object
+        model: fitted sklearn model
+        X_test: sequence of strings
+        num_examples: int, number of datapoints for explanation
+        num_features: int, number of explanatory features for single example
+        class_names: list of strings, class names
+    # Returns:
+        mean_contrib: list of tuples (word, word`s contribution) ordered by
+            absolute value of mean contribution.
+'''
+    pipe = make_pipeline(vectorizer, model)
+    idxs = np.random.choice(X_test.index, size=num_examples, replace=False)
+    contributors = defaultdict(list)
 
+    for i in idxs:
+        #Fix unicode errors to make explanations.
+        while True:
+            try:
+                explainer = LimeTextExplainer(class_names=class_names)
+                exp = explainer.explain_instance(X_test[i],
+                                                 pipe.predict_proba,
+                                         num_features=num_features)
+                break
+            except UnicodeDecodeError:
+                i = np.random.choice(X_test.index)
+
+        for word, weight in exp.as_list():
+            contributors[word.lower()].append(weight)
+
+    mean_contrib = []
+    for key in contributors:
+        mean_contrib.append((key, np.mean(contributors[key])))
+    mean_contrib.sort(key=lambda x: np.abs(x[1]), reverse=True)
+
+    return mean_contrib
+
+def baseline_grid_search(X_train, y_train):
+    '''Performs grid search over parameters of baseline model. Returns best
+    estimator.
+    '''
     pipe = Pipeline([('vectorizer', CountVectorizer(stop_words='english', decode_error='ignore')),
                   ('nb', MultinomialNB())])
 
@@ -273,57 +398,26 @@ def baseline_grid_search(X,y):
 
     return grid_search.best_estimator_
 
-def load_w2v(filename):
+def plot_explanation(mean_contrib, n):
+    '''Plot top word`s contribution for predicting class 'Relevant'
+
+    Example:
+
+    plot_explanation(mean_contrib, 15)
+    plt.savefig('contrib.png')
+    plt.show()
+
+    # Arguments:
+        mean_contrib: list of tuples (str, float)
+        n: int, number of contributing words to plot
     '''
-    Function to load w2v from filename
-    '''
-    model = KeyedVectors.load_word2vec_format(filename, binary=False)
-    return model
-
-def  preprocess(X,y):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
-    tokenizer = Tokenizer(num_words=None)
-    tokenizer.fit_on_texts(X_train)
-    X_train = tokenizer.texts_to_sequences(X_train)
-    X_test = tokenizer.texts_to_sequences(X_test)
-    #Limit vocab
-    vocab_size = 5000
-    seq_len=33
-    X_train = np.array([[vocab_size - 1 if i >= vocab_size else i for i in line] for line in X_train])
-    X_test = np.array([[vocab_size - 1 if i >= vocab_size else i for i in line] for line in X_test])
-    X_train = sequence.pad_sequences(X_train, maxlen=seq_len)
-    X_test = sequence.pad_sequences(X_test, maxlen=seq_len)
-    return tokenizer, X_train, X_test
-
-
-def explain_one_example(tokenizer, model, X_test, idx):
-    my_pipe = MyPipe(tokenizer, model)
-
-    explainer = LimeTextExplainer(class_names=['Not relevant', 'Relevant'])
-
-    print ('Tweet: {}'.format(X_test[idx]))
-    print (my_pipe.predict_proba(X_test[idx]))
-
-    exp = explainer.explain_instance(X[idx], my_pipe.predict_proba, num_features=5)
-
-    print (exp.as_list())
-
-
-def create_emb(w2v, tokenizer, vocab_size):
-    n_fact = w2v.vector_size
-    emb = np.zeros((vocab_size, n_fact))
-
-    for i in range(1,len(emb)):
-        word = tokenizer.idx2word[i]
-        if word in w2v.vocab:
-            emb[i] = w2v[word]
-    return emb
-
-def my_pipe_pedict_proba(X, tokenizer, model):
-    X = tokenizer.transform(X)
-    prob_1 = model.predict_proba(X)[0][0]
-    prob_0 = 1 - prob_1
-    return np.array([[prob_0, prob_1]])
+    contribs, weights = zip(*mean_contrib)
+    pos = range(n)
+    plt.barh(pos, weights[:n][::-1])
+    plt.yticks(pos, contribs[:n][::-1])
+    plt.title("Average word`s contribution for class 'Relevant'")
+    plt.xlabel('Weights')
+    plt.tight_layout()
 
 if __name__ == "__main__":
     df = pd.read_csv("socialmedia-disaster-tweets_clean.csv")
@@ -338,98 +432,20 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=1)
 
-    vocab_size=5000; seq_len=33
-
-    #tokenizer = MyTokenizer(vocab_size, seq_len, filters='!"$%&()*+,-./:;<=>?[\\]^_`{|}~\t\n')
-
-    #emb = np.loadtxt('emb.txt')
-
-    model = Sequential([
-        Embedding(vocab_size, 32, input_length=seq_len),
-        SpatialDropout1D(0.2),
-        Flatten(),
-        Dense(100, activation='relu'),
-        Dropout(0.7),
-        Dense(1, activation='sigmoid')])
-
-    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
-
-    # model_embed = Sequential([
-    #     Embedding(vocab_size, 50, weights=[emb], input_length=seq_len, trainable=False),
-    #     Flatten(),
-    #     Dense(100, activation='relu'),
-    #     Dropout(0.7),
-    #     Dense(1, activation='sigmoid')])
-    #
-    # model.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
-    #
-    #
-    # conv1 = Sequential([
-    #     Embedding(vocab_size, 25, input_length=seq_len),
-    #     SpatialDropout1D(0.2),
-    #     Conv1D(64, 5, padding='same', activation='relu'),
-    #     Dropout(0.3),
-    #     MaxPooling1D(),
-    #     Flatten(),
-    #     Dense(100, activation='relu'),
-    #     Dropout(0.7),
-    #     Dense(1, activation='sigmoid')])
-    #
-    # conv1.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
-    #
-    # #Best conv1 val accuracy: 0.8132
-    #
-    #
-    # conv1emb = Sequential([
-    #     Embedding(vocab_size, 50, input_length=seq_len, weights=[emb], trainable=False),
-    #     SpatialDropout1D(0.2),
-    #     Conv1D(128, 5, padding='same', activation='relu'),
-    #     Dropout(0.5),
-    #     MaxPooling1D(),
-    #     Flatten(),
-    #     Dense(100, activation='relu'),
-    #     Dropout(0.7),
-    #     Dense(1, activation='sigmoid')])
-    #
-    # conv1emb.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
-    #
-    # #Best conv1emb val accuracy: 0.8020
-    #
-    # conv1emb0_1 = Sequential([
-    #     Embedding(vocab_size, 50, input_length=seq_len, weights=[emb], trainable=False),
-    #     Conv1D(128, 5, padding='same', activation='relu'),
-    #     MaxPooling1D(5),
-    #     Conv1D(128, 5, padding='same', activation='relu'),
-    #     MaxPooling1D(),
-    #     Conv1D(128, 5, padding='same', activation='relu'),
-    #     MaxPooling1D(),
-    #     Flatten(),
-    #     Dense(100, activation='relu'),
-    #     Dropout(0.7),
-    #     Dense(1, activation='sigmoid')])
-
-    # conv1emb.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
-
-    # rnn = Sequential([
-    # (Embedding(vocab_size, 50, weights=[emb], input_length=seq_len, trainable=False)),
-    # (LSTM(100, go_backwards=True)),
-    # (Dense(1, activation='sigmoid'))])
-    #
-    # rnn.compile(loss='binary_crossentropy', optimizer=Adam(), metrics=['accuracy'])
-
-
-    pipe = KerasPipeline('cnn1d_emb', emb_path='full_emb.txt')
-    pipe.fit(X_train, y_train, X_test, y_test, epochs=2, batch_size=64)
+    pipe = KerasPipeline('lstm', emb_path='full_emb.txt')
+    pipe.fit(X_train, y_train, X_test, y_test, epochs=5, batch_size=64)
 
     # for model in ['nn', 'cnn1d', 'cnn1d_emb', 'lstm']:
     #     pipe = KerasPipeline(model, emb_path='full_emb.txt')
-    #     pipe.fit(X_train, y_train, X_test, y_test, epochs=1, batch_size=64)
+    #     pipe.fit(X_train, y_train, X_test, y_test, epochs=5, batch_size=64)
 
 
     #pipe.explain_one_example(9578)
 
-    #lstm 0.8112
+    #lstm 0.8135
     #cnn1d_emb 0.8076
     #nn 0.8085
 
+    #nb tfidf 0.8024
+    #rb tfidf 0.794
     filename='/Users/yauhenikoran/Glove/glove.twitter.27B.50d.w2v.txt'
