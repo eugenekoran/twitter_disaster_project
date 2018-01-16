@@ -2,7 +2,7 @@
 
 Lots of people are using Twitter every day. Ample amounts of text content are being created every day. But can we extract useful information from this data?
 
-In this project I was working with dataset consisting of 10860 tweets labeled by humans as 'Relevant' or 'Not Relevant' to disasters. Tweets were already filtered to contain keywords referring to disastrous events ('ablaze, 'quarantine', 'crash' etc.) This makes it close to a real world scenario when information was filtered by keywords and then supplied to Machine Learning algorithm for classification.
+In this project I was working with dataset consisting of 10860 tweets labeled by humans as 'Relevant' or 'Not Relevant' to disasters ([CrowdFlower.com](https://www.crowdflower.com/data-for-everyone/)). Tweets were already filtered to contain keywords referring to disastrous events ('ablaze, 'quarantine', 'crash' etc.) This makes it close to a real world scenario when information was filtered by keywords and then supplied to Machine Learning algorithm for classification.
 
 Accurate classifying algorithm could be a useful tool for civil forces to get actionable insights.
 
@@ -33,9 +33,9 @@ To save specificity of twitter corpus I didn't remove '#' and '@' signs. To save
 First, I applied simplistic approach to extracting text features - Bag of words. I vectorized tweets with TF-IDF, then applied Multinomial Naive Bayes model to make classification. Naive Bayes did surprisingly well with 80.24% accuracy on the test data. Given the specificity of the dataset and apparently wrong assumption of the model, this performance looked very suspicious.
 
 #### Deep Learning Models
-Next, I went to more sophisticated Deep Learning Models. Given small amount of data I decided to validate my DL models on the test data. First I used random trainable initialization of word embeddings then switched to [GloVe](https://nlp.stanford.edu/projects/glove/) word vectors. I decided to use GloVe because conveniently it has vectors pre-trained on 2B tweets.
+Next, I went to more sophisticated Deep Learning Models. Given small amount of data I decided to validate my DL models on the test data. First I used random trainable initialization of word embeddings, then switched to [GloVe](https://nlp.stanford.edu/projects/glove/) word vectors. I decided to use GloVe because conveniently it has vectors pre-trained on 2B tweets.
 
-First I followed standard practices and limited vocabulary (to 5000 words) of the pre-trained embeddings. With limited vocabulary my models were able to achieve 80%+ validation accuracy, but were not able to learn anything useful and were predicting all the probabilities in vicinity of 0.5. Then I tried to use full vocabulary of 19.800 words. And it really made a difference. Accuracy increased and model started to be consisted in predictions. I think that due to the limited corpus and repeating tweets in the data, top 5000 words were not a good representation of important words for this dataset.
+First I followed standard practices and limited vocabulary of the pre-trained embeddings (to 5000 words)  With limited vocabulary my models were able to achieve 80%+ validation accuracy, but were not able to learn anything useful and were predicting all the probabilities in vicinity of 0.5. Then I tried to use full vocabulary of 19.800 words. And it really made a difference. Accuracy increased and model started to be consisted in predictions. I think that due to the limited corpus and repeating tweets in the data, top 5000 words were not a good representation of important words for this dataset.
 
 I tried different models and here are validation accuracies for different architectures.
 
@@ -72,6 +72,8 @@ Explanations for 1 Hidden NN are much better, but still we can see terms exposin
 And finally LSTM. Overfitting is still a problem (Nepal, cloudy_goldrush). But in general, explanations of LSTM are the most intelligent.
 
 I chose LSTM as my final model and dockerized implementation of my model as API.
+
+I need to admit that my training data was skewed and the model was not tested on unseen data. I cannot guarantee performance of the model.
 
 1. To start dockerized API
 ```
