@@ -1,6 +1,7 @@
 # Twitter Disaster Prediction
 
 ![img](img/dataset-original.jpg)
+
 Lots of people are using Twitter every day. Ample amounts of text content are being created every day. But can we extract useful information from this data?
 
 In this project I was working with dataset consisting of 10860 tweets labeled by humans as 'Relevant' or 'Not Relevant' to disasters ([CrowdFlower.com](https://www.crowdflower.com/data-for-everyone/)). Tweets were already filtered to contain keywords referring to disastrous events ('ablaze, 'quarantine', 'crash' etc.) This makes it close to a real world scenario when information was filtered by keywords and then supplied to Machine Learning algorithm for classification.
